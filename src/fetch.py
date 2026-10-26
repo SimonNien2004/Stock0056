@@ -4,7 +4,7 @@
   price.csv      date, open, high, low, close, volume     （原始價，未還原）
   dividends.csv  date, cash_dividend                        （除息交易日、每單位現金股利）
   taiex.csv      date, close                                （加權指數）
-  inst.csv       date, foreign_net, trust_net               （外資、投信對 0056 淨買超股數）
+  inst.csv       date, foreign_net, trust_net               （外資、投信對本標的淨買超股數）
   meta.json      各資料的來源與最後日期
 """
 from __future__ import annotations
@@ -138,6 +138,24 @@ def update_all(cfg: dict) -> dict:
     except Exception as e:  # noqa: BLE001
         meta["warnings"].append(f"法人買賣超無法取得（模型會略過此特徵）：{e}")
         inst = pd.DataFrame(columns=["date", "foreign_net", "trust_net"])
+
+    # FinMind 偶爾晚一兩天更新：用 yfinance 補上最近缺的交易日
+    if meta["sources"]["price"] == "FinMind":
+        try:
+            yf_price, _ = _yf_price_and_div(symbol, (pd.Timestamp(price["date"].max()) - pd.Timedelta(days=10)).strftime("%Y-%m-%d"))
+            newer = yf_price[yf_price["date"] > str(price["date"].max())]
+            if len(newer):
+                price = pd.concat([price, newer], ignore_index=True)
+                meta["sources"]["price"] = "FinMind＋yfinance"
+                meta["warnings"].append(f"FinMind 尚未更新 {', '.join(newer['date'])}，這幾天的價格由 yfinance 補上")
+        except Exception as e:  # noqa: BLE001
+            meta["warnings"].append(f"yfinance 補抓最新價格失敗：{e}")
+
+    last = pd.Timestamp(price["date"].max())
+    expected = pd.Timestamp(date.today()) - pd.offsets.BDay(0 if pd.Timestamp.now(tz="Asia/Taipei").hour >= 15 else 1)
+    behind = len(pd.bdate_range(last + pd.Timedelta(days=1), expected))
+    if behind >= 1:
+        meta["warnings"].append(f"價格資料停在 {last:%Y-%m-%d}，比最近的工作日少 {behind} 天（可能是休市，或資料源還沒更新）")
 
     price.sort_values("date").to_csv(RAW / "price.csv", index=False)
     div.sort_values("date").to_csv(RAW / "dividends.csv", index=False)
