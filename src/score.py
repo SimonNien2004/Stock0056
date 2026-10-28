@@ -36,7 +36,7 @@ def signal(sc, pos120, p_up60, p_dip, q50_60, conf, th: dict):
     p_up60, p_dip, conf = np.asarray(p_up60, float), np.asarray(p_dip, float), np.asarray(conf)
     q50_60 = np.asarray(q50_60, float)
     aggressive = (sc >= th["aggressive"]) & (pos120 <= th["aggressive_max_pos120"]) & (p_up60 >= th["aggressive_min_p_up"])
-    # 0056 長期向上，延後買進只在預期報酬為負時才划算：評分低「且」中位數預期為負，或很可能再跌 3%
+    # 高股息 ETF 長期向上，延後買進只在預期報酬為負時才划算：評分低「且」中位數預期為負，或很可能再跌 3%
     pause = ((sc < th["pause"]) & (q50_60 < 0)) | (p_dip >= th["dip_pause_prob"])
     out = np.where(aggressive, AGGRESSIVE, np.where(pause, PAUSE, NORMAL))
     return np.where(conf == "低", NORMAL, out)   # 信心低 → 退回定期定額

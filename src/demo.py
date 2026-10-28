@@ -9,13 +9,15 @@ import json
 import numpy as np
 import pandas as pd
 
-from .config import RAW, ensure_dirs
+from .config import RAW, ensure_dirs, load_config
 
 
-def generate(seed: int = 7, end: str = "2026-10-23") -> dict:
+def generate(seed: int = 7, end: str | None = None) -> dict:
     ensure_dirs()
+    cfg = load_config()
+    end = end or pd.Timestamp.today().strftime("%Y-%m-%d")
     rng = np.random.default_rng(seed)
-    days = pd.bdate_range("2010-01-04", end)
+    days = pd.bdate_range(cfg["history_start"], end)
     n = len(days)
 
     # 市場因子：帶波動叢聚的報酬
@@ -25,21 +27,21 @@ def generate(seed: int = 7, end: str = "2026-10-23") -> dict:
     for i in range(1, n):
         vol[i] = np.sqrt(0.000002 + 0.08 * (vol[i - 1] * shocks[i - 1]) ** 2 + 0.90 * vol[i - 1] ** 2)
     mkt = 0.0003 + vol * shocks
-    twii = 8000 * np.exp(np.cumsum(mkt))
+    twii = 12000 * np.exp(np.cumsum(mkt))
 
-    # 0056 含息總報酬（對數）= 長期趨勢 + 跟隨大盤的隨機漫步 + 均值回歸偏離（已知可預測成分，用來驗證模型會學）
-    trend = np.log(23.0) + 0.00036 * np.arange(n)            # 約 9%/年 含息報酬
+    # 含息總報酬（對數）= 長期趨勢 + 跟隨大盤的隨機漫步 + 均值回歸偏離（已知可預測成分，用來驗證模型會學）
+    trend = np.log(15.0) + 0.00036 * np.arange(n)            # 約 9%/年 含息報酬
     walk = 0.6 * np.cumsum(mkt - mkt.mean())
     dev = np.zeros(n)
     for i in range(1, n):
         dev[i] = 0.985 * dev[i - 1] + 0.006 * rng.standard_normal()
     total_idx = np.exp(trend + walk + dev)
 
-    # 配息：每年 1、4、7、10 月第三個週三附近除息，約 1.6%/季
+    # 配息：config 的 ex_months 每月 18 日附近除息，約 1.6%/季
     df = pd.DataFrame(index=days)
     ex_dates = []
-    for y in range(2010, 2027):
-        for m in (1, 4, 7, 10):
+    for y in range(days[0].year, days[-1].year + 1):
+        for m in cfg.get("ex_months", (1, 4, 7, 10)):
             d = pd.Timestamp(year=y, month=m, day=18)
             pos = days.searchsorted(d)
             if pos < n:
@@ -51,7 +53,7 @@ def generate(seed: int = 7, end: str = "2026-10-23") -> dict:
     ex_set = set(ex_dates)
     for i, d in enumerate(days):
         if d in ex_set and i > 0:
-            dv = round(close[i - 1] * rng.uniform(0.014, 0.022), 3)
+            dv = round(close[i - 1] * rng.uniform(0.014, 0.022) * 4 / len(cfg.get("ex_months", (1, 4, 7, 10))), 3)
             factor *= (close[i - 1] - dv) / close[i - 1]
             divs.append((d.strftime("%Y-%m-%d"), dv))
         close[i] = round(total_idx[i] * factor, 2)

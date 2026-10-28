@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 
 from .config import PREDICTIONS_CSV, REPORTS
-from .features import FEATURE_TEXT, _next_rebalance
+from .features import FEATURE_TEXT, next_rebalance
 from .portfolio import what_if
 from .score import AGGRESSIVE, NORMAL, PAUSE
 
@@ -59,23 +59,102 @@ def live_accuracy(log: pd.DataFrame) -> dict:
 
 
 # ---------------------------------------------------------------- 文字
+def next_dca(d: pd.Timestamp, cfg: dict) -> pd.Timestamp | None:
+    """下一次定期定額扣款日（日曆日，遇休市券商會順延）。"""
+    days = sorted((cfg.get("dca") or {}).get("days") or [])
+    if not days:
+        return None
+    for k in range(3):
+        m = (d + pd.offsets.MonthBegin(k)) if k else d.replace(day=1)
+        last = (m + pd.offsets.MonthEnd(0)).day
+        for day in days:
+            t = m.replace(day=min(day, last))
+            if t > d:
+                return t
+    return None
+
+
+def next_ex_estimate(base: pd.DataFrame, d: pd.Timestamp, cfg: dict) -> pd.Timestamp | None:
+    """下次除息日（估）：優先用 config 的 ex_months / ex_day；沒有設定時用過去除息間隔的中位數。"""
+    months, day = cfg.get("ex_months"), int(cfg.get("ex_day", 18))
+    if months:
+        for y in (d.year, d.year + 1):
+            for m in sorted(months):
+                last = (pd.Timestamp(year=y, month=m, day=1) + pd.offsets.MonthEnd(0)).day
+                t = pd.Timestamp(year=y, month=m, day=min(day, last))
+                if t > d:
+                    return t
+    ex_dates = base.index[base["div"] > 0]
+    if not len(ex_dates):
+        return None
+    gaps = np.diff(ex_dates.values).astype("timedelta64[D]").astype(int)[-6:]
+    step = pd.Timedelta(days=int(np.median(gaps)) if len(gaps) else 91)
+    nxt = ex_dates[-1] + step
+    while nxt <= d:
+        nxt += step
+    return nxt
+
+
+def eval_budget(cfg: dict) -> float:
+    """回測用的每月額外預算：未設定時，以每月定期定額總額作為假設金額。"""
+    if cfg.get("monthly_budget"):
+        return float(cfg["monthly_budget"])
+    dca = cfg.get("dca") or {}
+    return float(dca.get("amount", 0) * len(dca.get("days", []))) or 10000.0
+
+
 def advice(sig: str, cfg: dict, close: float, pos: dict) -> list[str]:
-    B, R = cfg["monthly_budget"], cfg["reserve"]
-    if sig == AGGRESSIVE:
-        amt = B
-        lines = [f"可投入本月全部預算 {B:,.0f} 元；若手上有預備金，可視情況加碼（上限 {R:,.0f} 元）。"]
+    B, R = cfg.get("monthly_budget", 0), cfg.get("reserve", 0)
+    dca = cfg.get("dca") or {}
+    lines, amt = [], 0
+    nd = next_dca(pd.Timestamp(pos.get("date", pd.Timestamp.today())).normalize(), cfg)
+    if dca.get("amount") and nd is not None:
+        days = "、".join(str(x) for x in dca["days"])
+        lines.append(f"定期定額照常：每月 {days} 日各 {dca['amount']:,.0f} 元，下次約 {nd:%m/%d} 扣款（遇休市順延）。")
+    aim = cfg["thresholds"]["aggressive"]
+    pool = pos.get("pool")
+    if pool:
+        shared = f"，與 {'、'.join(pool['shared_with'])} 共用" if pool.get("shared_with") else ""
+        left = f"資金池剩 {pool['remaining']:,.0f} / {pool['total']:,.0f} 元{shared}"
+        if pool["remaining"] <= 0:
+            lines.append(f"額外加碼：資金池已用完（{left}）。")
+        elif sig == AGGRESSIVE:
+            amt = pool["cap_aggressive"]
+            if amt >= 100:
+                lines.append(f"額外加碼：本月最多可動用 {amt // 100 * 100:,.0f} 元（月初剩餘資金的 {pool['aggressive_pct']:.0%}"
+                             f"，已扣本月已用 {pool['used_month']:,.0f} 元；{left}）。")
+            else:
+                lines.append(f"額外加碼：本月額度已用完，下個月再動用（{left}）。")
+        elif sig == NORMAL:
+            amt = pool["cap_normal"]
+            if amt >= 100:
+                lines.append(f"額外加碼：本月最多可動用 {amt // 100 * 100:,.0f} 元（月初剩餘資金的 {pool['normal_pct']:.0%}；{left}）；"
+                             f"想投入更多，等評分 ≥ {aim} 再用。")
+            else:
+                lines.append(f"額外加碼：一般加碼的本月額度已用完；評分 ≥ {aim} 時可再動用到 {pool['aggressive_pct']:.0%}（{left}）。")
+        else:
+            lines.append(f"額外加碼：先保留資金池，定期定額照常即可（{left}）。")
+    elif sig == AGGRESSIVE:
+        if B:
+            amt = B
+            lines.append(f"額外加碼：可投入本月全部額外預算 {B:,.0f} 元" + (f"；預備金也可視情況動用（上限 {R:,.0f} 元）。" if R else "。"))
+        else:
+            lines.append("額外加碼：適合動用定期定額以外的資金（額外預算尚未設定，告訴 Claude 金額後會換算股數）。")
     elif sig == NORMAL:
-        amt = B / 2
-        lines = [f"本月預算先投入一半（約 {B / 2:,.0f} 元），其餘等評分 ≥ {cfg['thresholds']['aggressive']}，"
-                 f"或月底照定期定額投入。"]
+        if B:
+            amt = B / 2
+            lines.append(f"額外加碼：本月額外預算先投入一半（約 {B / 2:,.0f} 元），其餘等評分 ≥ {aim} 再用。")
+        else:
+            lines.append(f"額外加碼：可小額加碼；想一次投入較多，等評分 ≥ {aim} 再用。")
     else:
-        amt = 0
-        lines = [f"暫不加碼，資金保留到下次訊號；若連續 {cfg['backtest']['max_idle_months']} 個月沒有投入，"
-                 f"就照定期定額投入，避免資金閒置太久。"]
-    if amt:
-        w = what_if(pos, amt, close, cfg)
+        lines.append("額外加碼：先保留，定期定額照常即可。")
+    amt = int(amt // 100 * 100)   # 取整到百元
+    w_amt = amt or dca.get("amount", 0)
+    if w_amt:
+        w = what_if(pos, w_amt, close, cfg)
         if w["shares"]:
-            line = f"以今日收盤 {close:.2f} 估算，{amt:,.0f} 元約可買 {w['shares']:,} 股"
+            what = "下次定期定額" if not amt else "額外加碼"
+            line = f"以今日收盤 {close:.2f} 估算，{what} {w_amt:,.0f} 元約可買 {w['shares']:,} 股"
             if pos.get("has_position"):
                 line += f"，你的均價會從 {w['old_avg']:.2f} 變為 {w['new_avg']:.2f}"
             lines.append(line + "。")
@@ -104,18 +183,17 @@ def write_daily(*, base, X, today, contrib, pos, bt, ev, live, cfg, engine, meta
     d = base.index[-1]
     close = float(base["close"].iloc[-1])
     sig, sc, conf = today["signal"], float(today["score"]), today["confidence"]
-    ex_dates = base.index[base["div"] > 0]
-    next_ex = None
-    if len(ex_dates):
-        next_ex = ex_dates[-1] + pd.Timedelta(days=91)
-        while next_ex < d:
-            next_ex += pd.Timedelta(days=91)
-    next_rb = _next_rebalance(d)
+    next_ex = next_ex_estimate(base, d, cfg)
+    next_rb = next_rebalance(d, cfg)
     now = datetime.now(TPE).strftime("%Y-%m-%d %H:%M")
 
-    L = [f"# 0056 每日加碼報告｜{d:%Y-%m-%d}（收盤 {close:.2f}）", ""]
+    L = [f"# {cfg['symbol']} {cfg.get('name', '')} 每日加碼報告｜{d:%Y-%m-%d}（收盤 {close:.2f}）", ""]
     if "DEMO" in meta.get("sources", {}).values():
         L += ["> ⚠️ 本報告使用模擬資料，僅供測試程式，不代表真實行情。", ""]
+    stale = int(meta.get("stale_days", 0) or 0)
+    if stale:
+        L += [f"> ⚠️ 資料只到 {d:%Y-%m-%d}，比最近交易日少 {stale} 天（資料源尚未更新）；以下評分用的是舊價格。", ""]
+    L += [f"資料截止：**{d:%Y-%m-%d}**" + ("" if stale else "（已是最新交易日）"), ""]
     L += ["## 結論", "",
           f"**加碼評分：{sc:.0f} / 100 → {sig}**（信心 {conf}）", ""]
     L += [f"- {x}" for x in advice(sig, cfg, close, pos)]
@@ -141,7 +219,13 @@ def write_daily(*, base, X, today, contrib, pos, bt, ev, live, cfg, engine, meta
               f"| 未實現損益 | {pos['unrealized']:+,.0f} 元（{pos['unrealized_pct']:+.1%}） |",
               f"| 累計領息（扣補充保費） | {pos['cum_dividends']:,.0f} 元 |",
               f"| 含息總損益 | {pos['total_pl']:+,.0f} 元 |",
-              f"| 成本殖利率（近 12 個月） | {pos['cost_yield']:.2%} |", ""]
+              f"| 成本殖利率（近 12 個月） | {pos['cost_yield']:.2%} |"]
+        if pos.get("pool"):
+            p = pos["pool"]
+            detail = (f"（本檔 {p['used_self']:,.0f}、{'、'.join(p['shared_with'])} {p['used_others']:,.0f}）"
+                      if p.get("shared_with") else "")
+            L += [f"| 額外資金池 | 已用 {p['used']:,.0f}／{p['total']:,.0f} 元{detail}，剩 {p['remaining']:,.0f} 元 |"]
+        L += [""]
     else:
         L += ["尚未記錄持股。在 Claude 對話中說「我有 20 張，均價 33.5」或回報交易即可建立。", ""]
 
@@ -158,7 +242,7 @@ def write_daily(*, base, X, today, contrib, pos, bt, ev, live, cfg, engine, meta
 
     s, c = bt["signal"], bt["dca"]
     L += ["## 系統表現", "",
-          f"回測 {bt['start']:%Y-%m-%d} ～ {bt['end']:%Y-%m-%d}，每月預算 {cfg['monthly_budget']:,.0f} 元，僅用樣本外預測：", "",
+          f"回測 {bt['start']:%Y-%m-%d} ～ {bt['end']:%Y-%m-%d}，每月 {eval_budget(cfg):,.0f} 元{'' if cfg.get('monthly_budget') else ('（以定期定額月總額作為回測假設）' if (cfg.get('dca') or {}).get('amount') else '（未設定預算，以 10,000 元作為回測假設）')}，僅用樣本外預測：", "",
           "| 策略 | 年化報酬（XIRR） | 總報酬 | 平均買入價（還原價） | 最大回撤 |", "| --- | --- | --- | --- | --- |",
           f"| 照訊號加碼 | {_pct(s['xirr'])} | {_pct(s['total_return'])} | {s['avg_cost']:.2f} | {_pct(s['max_drawdown'])} |",
           f"| 定期定額 | {_pct(c['xirr'])} | {_pct(c['total_return'])} | {c['avg_cost']:.2f} | {_pct(c['max_drawdown'])} |",
@@ -188,6 +272,7 @@ def write_daily(*, base, X, today, contrib, pos, bt, ev, live, cfg, engine, meta
         "backtest": {"signal_xirr": s["xirr"], "dca_xirr": c["xirr"], "cost_diff": bt["cost_diff"]},
         "evaluation": {k: v for k, v in ev.items() if k != "calibration"},
         "live": live, "engine": engine, "data_source": meta.get("sources"), "generated_at": now,
+        "data_stale_days": int(meta.get("stale_days", 0) or 0), "data_warnings": meta.get("warnings", []),
     }
     (REPORTS / "latest.json").write_text(json.dumps(js, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     return js

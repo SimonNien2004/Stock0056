@@ -1,6 +1,6 @@
 # 給 Claude 的工作說明（0056 加碼助理）
 
-這個 repo 是使用者本人的 0056（元大高股息）存股加碼助理。使用者以存股為主，只想知道「什麼時候加碼」，不做賣出或停損判斷。
+這個 repo 是使用者本人的 0056（元大高股息）存股加碼助理。使用者另有 00878、00881、00919、00940 版本（SimonNien2004/Stock00878、Stock00881、Stock00919、Stock00940），程式相同、設定不同。0056 歷史最長（2007 年上市），是五檔中模型樣本最多的。使用者以存股為主，只想知道「什麼時候加碼」，不做賣出或停損判斷。
 GitHub Actions 每個交易日 16:00（台北）自動更新資料與報告；你在對話中負責讀報告、回答問題、記錄交易。
 
 ## 先讀這些檔案
@@ -37,14 +37,21 @@ GitHub Actions 每個交易日 16:00（台北）自動更新資料與報告；�
 
 ## 記錄交易
 
+使用者的資金分兩種，記錄時要分清楚（設定在 `config.yaml` 的 `dca` 與 `extra_pool`）：
+- **定期定額**：每月 8、18、28 日各 3,000 元自動扣款。記錄時 note 填「定期定額」，**不要**加 `--extra`。
+- **額外資金池**：一筆 100,000 元，**與 00878、00881、00919、00940 共用**（五檔合計），用完為止。一般加碼每月最多動用月初剩餘的 10%，積極加碼 30%（五檔合計）。使用者說「額外加碼」或「用加碼資金買」時加上 `--extra`。分不清楚就問。
+
+**共用資金池的同步（重要）**：在本 repo 記一筆 `--extra` 後，指令會印出要在 Stock00878、Stock00881、Stock00919、Stock00940 各執行一次的 `ledger` 指令。要把那四個 repo（SimonNien2004/Stock00878、SimonNien2004/Stock00881、SimonNien2004/Stock00919、SimonNien2004/Stock00940）也 clone 下來各執行一次，五個 repo 都 commit 並 push，資金池才會一致。
+
 使用者說「今天買了 5 張 36.2」時：
 1. 複誦確認：日期、股數（1 張 = 1000 股，零股照實際股數）、價格、手續費（預設依 `config.yaml` 計算）。
 2. 使用者確認後才寫入：
    ```
-   python -m src.portfolio add --date 2026-10-23 --shares 5000 --price 36.2
+   python -m src.portfolio add --date 2026-10-23 --shares 5000 --price 36.2 --note 定期定額
+   python -m src.portfolio add --date 2026-10-23 --shares 280 --price 35.5 --extra   # 額外加碼
    ```
    使用者給的是「總張數與均價」而不是逐筆紀錄時，用一筆 buy 代表期初持股，note 填「期初持股」。
-3. commit 並 push：`git add data/trades.csv && git commit -m "記錄交易：<內容>" && git push`
+3. commit 並 push：`git add data/trades.csv data/pool_ledger.csv && git commit -m "記錄交易：<內容>" && git push`
 4. 用 `python -m src.portfolio summary` 回報新的持股、均價與領息。
 
 配息不用手動記，程式依除息日前的持股自動計算（單筆 ≥ 2 萬元會扣二代健保補充保費 2.11%）。

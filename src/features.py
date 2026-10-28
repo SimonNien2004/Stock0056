@@ -62,19 +62,24 @@ def _rsi(s: pd.Series, n: int = 14) -> pd.Series:
     return 100 - 100 / (1 + up / dn.replace(0, np.nan))
 
 
-def _range_pos(s: pd.Series, w: int) -> pd.Series:
-    lo, hi = s.rolling(w).min(), s.rolling(w).max()
+def _range_pos(s: pd.Series, w: int, minp: int | None = None) -> pd.Series:
+    lo, hi = s.rolling(w, min_periods=minp).min(), s.rolling(w, min_periods=minp).max()
     return ((s - lo) / (hi - lo).replace(0, np.nan)).fillna(0.5)
 
 
-def _next_rebalance(d: pd.Timestamp) -> pd.Timestamp:
-    """臺灣高股息指數 6、12 月調整，生效日約在第三個週五之後；以每月 15 日近似。"""
+def _next_rebalance(d: pd.Timestamp, months=(5, 11), day: int = 31) -> pd.Timestamp:
+    """下次成分股調整日（近似）：config 的 rebalance_months / rebalance_day。"""
     for y in (d.year, d.year + 1):
-        for m in (6, 12):
-            t = pd.Timestamp(year=y, month=m, day=15)
+        for m in sorted(months):
+            last = pd.Timestamp(year=y, month=m, day=1) + pd.offsets.MonthEnd(0)
+            t = pd.Timestamp(year=y, month=m, day=min(day, last.day))
             if t >= d:
                 return t
     return d
+
+
+def next_rebalance(d: pd.Timestamp, cfg: dict) -> pd.Timestamp:
+    return _next_rebalance(d, cfg.get("rebalance_months", (5, 11)), cfg.get("rebalance_day", 31))
 
 
 def build(cfg: dict, raw: dict | None = None) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -94,11 +99,14 @@ def build(cfg: dict, raw: dict | None = None) -> tuple[pd.DataFrame, pd.DataFram
     base["adj"] = adjusted_close(base["close"], base["div"])
 
     a = base["adj"]
+    # 暖機期：240 日指標至少要有幾天資料才開始算（歷史很短的 ETF 可調小，預設 240）
+    warm = int(cfg.get("warmup_days", 240))
     X = pd.DataFrame(index=base.index)
     X["pos120"] = _range_pos(a, 120)
-    X["pos240"] = _range_pos(a, 240)
-    for w in (20, 60, 240):
+    X["pos240"] = _range_pos(a, 240, min(warm, 240))
+    for w in (20, 60):
         X[f"bias{w}"] = a / a.rolling(w).mean() - 1
+    X["bias240"] = a / a.rolling(240, min_periods=min(warm, 240)).mean() - 1
     X["ret20"] = a.pct_change(20)
     X["ret60"] = a.pct_change(60)
     X["vol20"] = a.pct_change().rolling(20).std() * np.sqrt(252)
@@ -116,14 +124,17 @@ def build(cfg: dict, raw: dict | None = None) -> tuple[pd.DataFrame, pd.DataFram
         if len(past):
             last = past[-1]
             since.append((d - last).days)
-            nxt = last + pd.Timedelta(days=91)
+            # 以「到當天為止」的歷史除息間隔中位數推估（季配約 91 天、半年配約 182 天），不偷看未來
+            gaps = np.diff(past.values).astype("timedelta64[D]").astype(int)[-6:]
+            step = pd.Timedelta(days=int(np.median(gaps)) if len(gaps) else 91)
+            nxt = last + step
             while nxt < d:
-                nxt += pd.Timedelta(days=91)
+                nxt += step
             to_ex.append((nxt - d).days)
         else:
             since.append(np.nan)
             to_ex.append(np.nan)
-        to_rb.append((_next_rebalance(d) - d).days)
+        to_rb.append((next_rebalance(d, cfg) - d).days)
     X["days_since_ex"], X["days_to_ex"], X["days_to_rebal"] = since, to_ex, to_rb
 
     tw = raw["taiex"]["close"].reindex(base.index).ffill() if len(raw["taiex"]) else pd.Series(np.nan, index=base.index)
@@ -145,6 +156,6 @@ def build(cfg: dict, raw: dict | None = None) -> tuple[pd.DataFrame, pd.DataFram
     fut_min = a[::-1].rolling(60, min_periods=60).min()[::-1].shift(-1)
     Y["dip"] = (fut_min <= a * (1 - cfg["dip_pct"])).astype(float).where(fut_min.notna())
 
-    # 去掉暖機期（240 日）
+    # 去掉暖機期（warmup_days，預設 240 日）
     valid = X["bias240"].notna()
     return base[valid], X.loc[valid, FEATURES], Y[valid]
