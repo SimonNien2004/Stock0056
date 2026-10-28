@@ -6,7 +6,7 @@
   "confidence": "高",
   "advice": [
     "本月預算先投入一半（約 4,500 元），其餘等評分 ≥ 75，或月底照定期定額投入。",
-    "以今日收盤 57.25 估算，4,500 元約可買 78 股，你的均價會從 57.75 變為 57.48。"
+    "以今日收盤 57.25 估算，4,500 元約可買 78 股，你的均價會從 57.50 變為 57.41。"
   ],
   "prediction": {
     "p_up20": 0.6445505112233123,
@@ -30,19 +30,19 @@
     "ttm_div": 4.936,
     "last_div": 1.72,
     "market_yield": 0.08621834061135371,
-    "shares": 51.0,
-    "lots": 0.051,
-    "cost": 2945.25,
-    "avg_cost": 57.75,
-    "market_value": 2919.75,
-    "unrealized": -25.5,
-    "unrealized_pct": -0.008658008658008658,
+    "shares": 103.0,
+    "lots": 0.103,
+    "cost": 5922.13,
+    "avg_cost": 57.496407766990295,
+    "market_value": 5896.75,
+    "unrealized": -25.38000000000011,
+    "unrealized_pct": -0.004285620207594245,
     "cum_dividends": 87.72,
-    "total_pl": 62.22,
-    "cost_yield": 0.08547186147186148,
-    "next_div_est": 87.72,
+    "total_pl": 62.33999999999989,
+    "cost_yield": 0.08584884154856444,
+    "next_div_est": 177.16,
     "next_div_nhi": 0.0,
-    "n_trades": 1.0
+    "n_trades": 2.0
   },
   "next_ex_dividend_est": "2027-01-21",
   "next_rebalance_est": "2026-12-15",
@@ -70,5 +70,5 @@
     "taiex": "FinMind",
     "inst": "FinMind"
   },
-  "generated_at": "2026-10-28 22:14"
+  "generated_at": "2026-10-28 22:52"
 }
